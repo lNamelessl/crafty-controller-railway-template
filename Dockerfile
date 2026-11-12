@@ -15,7 +15,15 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 COPY railway-entrypoint.sh /railway-entrypoint.sh
-RUN chmod +x /railway-entrypoint.sh
+COPY java-shim.sh /usr/local/bin/java
+RUN chmod +x /railway-entrypoint.sh /usr/local/bin/java
+
+# JVM heap ceiling (MB) for Minecraft servers spawned by Crafty. The java
+# shim clamps any larger -Xmx down to this and logs a note; raise the
+# MEMORY variable post-deploy to allow bigger heaps.
+ENV MEMORY=2048
+# Max seconds the java shim waits for an in-flight server-jar download.
+ENV JAR_WAIT_TIMEOUT=300
 
 # Upstream ENTRYPOINT is /crafty/docker_launcher.sh with CMD ["-d","-i"]
 # (daemon mode, ignore session.lock). We keep both and only wrap the

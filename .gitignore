@@ -1,3 +1,15 @@
 accept*.mjs
 accept-state.json
 scratch/
+upstream-src/
+diag-1/
+diag-*.mjs
+diag-*.json
+diag-*.log
+tpl_now.json
+templates_own.json
+deploy_page.html
+tpl_query.txt
+.git-info
+verify-accept.mjs
+TEMPLATE_OVERVIEW.md

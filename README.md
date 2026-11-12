@@ -18,10 +18,11 @@ Run Minecraft servers from a web panel — [Crafty Controller 4](https://craftyc
 |---|---|
 | `PORT` | `8000` — Railway's router target; an internal HTTP→HTTPS bridge forwards to Crafty's own TLS listener on 8443 |
 | `TZ` | `Etc/UTC` — set it to your timezone so schedules/backups read local time |
+| `MEMORY` | `2048` — JVM heap ceiling (MB) for Minecraft servers spawned by the panel; the start wrapper clamps any larger in-panel setting down to this, so raise it when you want bigger heaps |
 
 ## First login — fetch your generated credentials
 
-Crafty generates a random admin username and password on first boot and writes them to **`default-creds.txt`** in the config dir. Fetch them with the Railway CLI:
+Crafty generates a random admin username and password on first boot and writes them to **`default-creds.txt`** in the config dir. The template prints that file into your **deployment logs** as soon as it exists — open your service → **Deployments → View Logs** and look for the `CRAFTY PANEL FIRST LOGIN` banner. CLI users can equivalently read the volume file:
 
 ```bash
 railway link            # pick your project + Crafty service
@@ -43,7 +44,7 @@ Then:
 1. Panel → **Servers** → **+ Create** → **Minecraft Java**.
 2. Choose a server type/version (Paper recommended — it downloads automatically).
 3. **Set the port to `25565`** — that is the port wired to the public TCP proxy.
-4. Create, then **Start**. First start downloads the server jar and generates the world.
+4. Create, then **Start** (or just tick the EULA box in the wizard — that auto-starts). A start wrapper holds the launch until the server jar has finished downloading, so first starts boot cleanly a few seconds after creation — check the server console for the `[railway-java]` lines if you're curious.
 5. Players join at the **TCP proxy address**: check your service's Settings or run `railway variables` and use `RAILWAY_TCP_PROXY_DOMAIN`:`RAILWAY_TCP_PROXY_PORT` (e.g. `crafty-mc.proxy.rlwy.net:12345`).
 
 ### Java vs Bedrock — read this
@@ -64,7 +65,8 @@ Railway TCP proxies are per-port. To expose a second server on port 25566:
 
 - **One volume** (platform limit): everything under `/crafty/*` is linked into a single volume at `/data` by the entrypoint — same on-disk layout as upstream, one mount.
 - **Panel TLS**: Crafty itself serves a self-signed cert on 8443 (upstream default). On Railway, TLS terminates at the edge with a valid Railway certificate, and an internal bridge forwards to Crafty — so no browser warning. The self-signed cert remains an internal detail.
-- **Memory**: the panel idles around 300–500 MB; **budget 2–3 GB total** for the panel plus one small Paper server (more for bigger servers/modpacks — set it in the panel's server settings).
+- **Deterministic server starts**: upstream starts the server jar download asynchronously after creation and, on the default wizard path (EULA ticked), fires a start ~1 s later — before the jar exists, which upstream lets exit instantly as a "crashed" server. This template ships a `java` wrapper that waits for the download to complete (size-stable + valid jar) before launching, so a fresh server boots on the first try. If a download genuinely fails, the real error surfaces after `JAR_WAIT_TIMEOUT` (default 300 s) instead of hanging.
+- **Memory**: the panel idles around 300–500 MB; a Paper server with the default 2 GB heap peaks near 1.5 GB. **Budget 2–3 GB total** for panel + one small Paper server. The `MEMORY` variable (default 2048 MB) caps Minecraft JVM heaps — raise it together with the in-panel memory setting for bigger servers/modpacks.
 - **Backups**: create backup schedules in the panel — they land in `/data/backups` on the volume. Download them via the panel or `railway ssh`; for off-Railway safety, push them to object storage.
 
 ## Cost
@@ -75,11 +77,13 @@ Crafty's panel plus one small Paper server with 2–3 GB of RAM and a 5 GB volum
 
 | Symptom | Fix |
 |---|---|
-| Can't log in / lost credentials | `railway ssh` → `cat /data/config/default-creds.txt` (works until you delete the file after your first password change). |
+| Can't log in / lost credentials | Open **Deployments → View Logs** and find the `CRAFTY PANEL FIRST LOGIN` banner, or `railway ssh` → `cat /data/config/default-creds.txt` (works until you delete the file after your first password change). |
 | Server created but players can't join | Did you set the server's port to `25565` (the TCP-proxied port)? Join via `RAILWAY_TCP_PROXY_DOMAIN`:`RAILWAY_TCP_PROXY_PORT`, never `:25565` directly. |
 | Second server unreachable | No TCP proxy exists for its port — add one in Settings → Networking (see above). |
 | Bedrock server unreachable | Expected — Railway has no UDP ingress (Java edition only over the internet). |
-| Server lags / OOM-restarts | Railway usage-based RAM — check metrics; raise in-panel server memory only for bigger modpacks. |
+| Server lags / OOM-restarts | Railway usage-based RAM — check metrics; raise the `MEMORY` variable AND the in-panel server memory together for bigger modpacks. |
+| Console shows `[railway-java] waiting for the server jar download` | Normal on fresh servers — the start wrapper is holding the launch until the jar finishes downloading; the server boots automatically right after. |
+| `[railway-java] ... not ready after 300s` | The jar download failed upstream (catalog/CDN hiccup). Delete the server in the panel and create it again, or use Servers → Update on the existing one. |
 | Panel unreachable right after deploy | First boot initializes the DB and generates credentials — give it a minute, then reload. |
 | `session.lock` / double-launch warnings | The image ships with `-i` (ignore session lock) for exactly this environment. |
 

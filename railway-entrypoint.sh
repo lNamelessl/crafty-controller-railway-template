@@ -1,7 +1,7 @@
 #!/bin/bash
 # Railway entrypoint for Crafty Controller 4.
 #
-# Two jobs, both upstream-compatible:
+# Three jobs, all upstream-compatible:
 #
 # 1. One-volume persistence. Railway allows exactly one volume per service;
 #    it is mounted at /data. The upstream image expects five separate paths
@@ -23,8 +23,14 @@
 #      Everything created later at runtime is created BY crafty, so it is
 #      already crafty-owned and writable.
 #
-# After that we hand off to the untouched upstream launcher, which seeds
-# nothing extra, drops to the crafty user and runs main.py.
+# 3. Deterministic first server start + non-CLI login discoverability:
+#    - pre-seed the big-bucket jar catalog cache so jar downloads cannot
+#      silently fail when the catalog endpoint is unreachable at boot;
+#    - print default-creds.txt to the deploy log once it exists (users
+#      without railway ssh cannot otherwise read a volume file);
+#    - the java shim at /usr/local/bin/java (see java-shim.sh) makes server
+#      starts wait for the async jar download and enforces the MEMORY heap
+#      ceiling.
 
 set -e
 
@@ -58,6 +64,44 @@ make_link backups /crafty/backups
 make_link logs    /crafty/logs
 make_link import  /crafty/import
 
+# First-boot hardening for the server-jar catalog cache. Crafty fetches its
+# "big bucket" jar catalog (jars.arcadiatech.org manifest) into
+# config/bigbucket.json; if that fetch fails on the very first boot the cache
+# stays missing and every "download jar" server creation silently fails
+# (get_fetch_url returns None -> no download, no error). Pre-seeding the cache
+# at boot makes jar downloads work even when the catalog endpoint hiccups;
+# the app's own 12-hour refresher overwrites it once it can reach the bucket.
+BIGBUCKET_CACHE="${DATA_ROOT}/config/bigbucket.json"
+if [ ! -s "${BIGBUCKET_CACHE}" ]; then
+    echo "[railway] pre-seeding big-bucket jar catalog cache..."
+    seeded=0
+    for attempt in 1 2 3; do
+        if python3 -c "
+import json, urllib.request
+req = urllib.request.Request(
+    'https://jars.arcadiatech.org/manifest.json',
+    headers={'User-Agent': 'crafty-railway-template-preseed'},
+)
+with urllib.request.urlopen(req, timeout=20) as r:
+    manifest = json.load(r)
+with open('${BIGBUCKET_CACHE}', 'w') as f:
+    json.dump({'last_refreshed': 'preseeded by railway entrypoint', 'categories': manifest}, f)
+" 2>/dev/null; then
+            seeded=1
+            break
+        fi
+        sleep 3
+    done
+    if [ "$seeded" -eq 1 ]; then
+        chgrp root "${BIGBUCKET_CACHE}" 2>/dev/null || true
+        chmod g+rw "${BIGBUCKET_CACHE}" 2>/dev/null || true
+        echo "[railway] jar catalog cache seeded (server downloads work even if the catalog endpoint is down)"
+    else
+        rm -f "${BIGBUCKET_CACHE}.tmp"
+        echo "[railway] jar catalog cache pre-seed failed (catalog unreachable) - Crafty will retry on its 12h schedule"
+    fi
+fi
+
 # First boot only: the upstream launcher seeds ./app/config from
 # ./app/config_original when it is empty, but its perm repair never
 # reaches inside our volume (find does not follow symlinks) and files it
@@ -71,6 +115,32 @@ if [ -z "$(ls -A /crafty/app/config 2>/dev/null)" ]; then
     chmod -R g+rwX "${DATA_ROOT}/config"
     find "${DATA_ROOT}/config" -type d -exec chmod g+s {} +
 fi
+
+# First-login discoverability for non-CLI users. Crafty generates
+# /data/config/default-creds.txt a few seconds after first boot; CLI users
+# read it with `railway ssh`, but dashboard-only users have no shell. Print
+# the file to the deploy log (Railway dashboard -> Deployments -> View Logs)
+# as soon as it appears. Reprints on later boots while the file still exists
+# (i.e. while the default password is still unchanged).
+(
+    n=0
+    while [ "$n" -lt 120 ]; do
+        if [ -s "${DATA_ROOT}/config/default-creds.txt" ]; then
+            echo "[railway] ============================================================"
+            echo "[railway] CRAFTY PANEL FIRST LOGIN (username + password below)"
+            cat "${DATA_ROOT}/config/default-creds.txt"
+            echo "[railway] (same file lives at /data/config/default-creds.txt on the volume;"
+            echo "[railway]  change the password in the panel after your first login)"
+            echo "[railway] ============================================================"
+            break
+        fi
+        sleep 5
+        n=$((n + 1))
+    done
+) &
+
+echo "[railway] MEMORY=${MEMORY:-2048}MB is the JVM heap ceiling (raise the MEMORY variable for bigger Minecraft heaps)"
+echo "[railway] server starts wait for the jar download to complete automatically (no more instant-exit crashes on fresh servers)"
 
 # Plain-HTTP bridge for Railway's router. Crafty v4 is HTTPS-only (self-signed
 # cert on 8443); Railway terminates TLS at the edge and forwards plain HTTP to
