@@ -6,10 +6,13 @@ diag-1/
 diag-*.mjs
 diag-*.json
 diag-*.log
+verify-1/
+verify-2/
+verify-race.mjs
+verify-accept.mjs
 tpl_now.json
 templates_own.json
 deploy_page.html
 tpl_query.txt
 .git-info
-verify-accept.mjs
 TEMPLATE_OVERVIEW.md
